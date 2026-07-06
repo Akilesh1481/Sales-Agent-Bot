@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
-import sqlite3
 from typing import Any, Dict, List, Optional, TypedDict
 
 from dotenv import load_dotenv
@@ -12,11 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, StateGraph
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from pydantic import BaseModel
 
 load_dotenv()
 
-app = FastAPI(title="Custom LangChain SQL Agent with Gemini")
+app = FastAPI(title="Custom LangChain SQL Agent with Gemini and MCP")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,8 +28,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_PATH = os.getenv("DB_PATH", os.path.abspath("sales.db"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
+DEBUG_RESPONSE = os.getenv("DEBUG_RESPONSE", "false").lower() == "true"
+
+MCP_SERVER_FILE = os.getenv("MCP_SERVER_FILE", "sqlite_mcp_server.py")
 
 FORBIDDEN_SQL = re.compile(
     r"\b(insert|update|delete|drop|alter|create|attach|detach|replace|pragma|vacuum|reindex|truncate)\b",
@@ -63,13 +67,6 @@ def get_llm(model_env_name: str, default_model: str):
     )
 
 
-def connect_readonly() -> sqlite3.Connection:
-    uri = f"file:{os.path.abspath(DB_PATH)}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def is_safe_select(sql: str) -> tuple[bool, str]:
     q = sql.strip()
 
@@ -85,41 +82,101 @@ def is_safe_select(sql: str) -> tuple[bool, str]:
     return True, "safe"
 
 
-def run_readonly_sql(sql: str) -> List[Dict[str, Any]]:
+async def call_mcp_tool_async(tool_name: str, arguments: Dict[str, Any]) -> Any:
+    """
+    MCP Client function.
+
+    FastAPI calls this function when it needs to use a tool exposed by
+    sqlite_mcp_server.py.
+    """
+
+    server_path = os.path.abspath(MCP_SERVER_FILE)
+
+    server_params = StdioServerParameters(
+        command="python",
+        args=[server_path],
+        env=os.environ.copy(),
+    )
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            result = await session.call_tool(
+                tool_name,
+                arguments=arguments,
+            )
+
+            parsed_contents = []
+            for item in result.content:
+                if hasattr(item, "text"):
+                    try:
+                        parsed_contents.append(json.loads(item.text))
+                    except Exception:
+                        parsed_contents.append(item.text)
+                else:
+                    parsed_contents.append(item)
+
+            if tool_name == "run_readonly_sql":
+                return parsed_contents
+
+            if len(parsed_contents) == 1:
+                return parsed_contents[0]
+
+            return parsed_contents
+
+
+def call_mcp_tool(tool_name: str, arguments: Dict[str, Any]) -> Any:
+    """
+    Synchronous wrapper for calling MCP tools from normal FastAPI functions.
+    """
+
+    return asyncio.run(call_mcp_tool_async(tool_name, arguments))
+
+
+def get_schema_text() -> str:
+    """
+    Gets schema from the MCP server instead of directly reading SQLite.
+    """
+
+    schema = call_mcp_tool("get_database_schema", {})
+
+    if isinstance(schema, str):
+        return schema
+
+    return str(schema)
+
+
+def run_sql_through_mcp(sql: str) -> List[Dict[str, Any]]:
+    """
+    Sends SQL to MCP server.
+
+    The backend does not directly connect to SQLite.
+    SQL execution happens through the MCP tool run_readonly_sql.
+    """
+
     safe, reason = is_safe_select(sql)
 
     if not safe:
         raise ValueError(reason)
 
-    conn = connect_readonly()
+    result = call_mcp_tool("run_readonly_sql", {"sql": sql})
 
-    try:
-        cur = conn.execute(sql)
-        return [dict(row) for row in cur.fetchall()]
-    finally:
-        conn.close()
+    if result is None:
+        return []
 
+    if isinstance(result, list):
+        return result
 
-def get_schema_text() -> str:
-    conn = connect_readonly()
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
 
-    try:
-        tables = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-        ).fetchall()
-
-        chunks = []
-
-        for table in tables:
-            table_name = table[0]
-            cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-            col_text = ", ".join([f"{c['name']} {c['type']}" for c in cols])
-            chunks.append(f"{table_name}({col_text})")
-
-        return "\n".join(chunks)
-
-    finally:
-        conn.close()
+    raise ValueError(f"Unexpected MCP result format: {result}")
 
 
 def parse_json_from_llm(text: str) -> Dict[str, Any]:
@@ -188,9 +245,9 @@ def custom_langchain_sql_agent(
     """
     Customized LangChain SQL Agent.
 
-    This agent does not execute SQL directly.
-    It only generates a safe SQLite SELECT query.
-    Execution happens later through read-only guarded database function.
+    It generates SQL only.
+    It does not execute SQL directly.
+    SQL execution is done through the MCP SQLite server.
     """
 
     llm = get_llm("SQL_MODEL", "gemini-2.5-flash")
@@ -292,7 +349,7 @@ Planner Output:
 SQL Generated By SQL Agent:
 {sql}
 
-Rows Returned From Database:
+Rows Returned From Database Through MCP:
 {rows}
 """)
     ])
@@ -367,13 +424,17 @@ def build_validation_graph():
             }
 
         try:
-            rows = run_readonly_sql(state["sql"])
-            return {"rows": rows}
+            rows = run_sql_through_mcp(state["sql"])
+
+            return {
+                "rows": rows,
+                "feedback": ""
+            }
 
         except Exception as exc:
             return {
                 "valid": False,
-                "feedback": f"SQL execution failed: {exc}",
+                "feedback": f"MCP SQL execution failed: {exc}",
                 "rows": []
             }
 
@@ -419,6 +480,7 @@ def build_validation_graph():
     graph.add_node("final", final_answer_node)
 
     graph.set_entry_point("generate_sql")
+
     graph.add_edge("generate_sql", "execute_sql")
     graph.add_edge("execute_sql", "validate")
 
@@ -440,8 +502,9 @@ def build_validation_graph():
 @app.get("/")
 def root():
     return {
-        "message": "Custom LangChain SQL Agent backend is running.",
-        "docs": "http://127.0.0.1:8000/docs"
+        "message": "Custom LangChain SQL Agent backend with MCP is running.",
+        "docs": "http://127.0.0.1:8000/docs",
+        "mcp_server": MCP_SERVER_FILE
     }
 
 
@@ -449,8 +512,9 @@ def root():
 def health():
     return {
         "status": "ok",
-        "db_path": DB_PATH,
         "llm_provider": "Google Gemini",
+        "mcp_enabled": True,
+        "mcp_server_file": MCP_SERVER_FILE,
         "planner_model": os.getenv("PLANNER_MODEL", "gemini-2.5-flash"),
         "sql_model": os.getenv("SQL_MODEL", "gemini-2.5-flash"),
         "validation_model": os.getenv("VALIDATION_MODEL", "gemini-2.5-flash"),
@@ -460,10 +524,12 @@ def health():
 
 @app.get("/schema")
 def schema():
-    return {"schema": get_schema_text()}
+    return {
+        "schema": get_schema_text(),
+        "source": "MCP get_database_schema tool"
+    }
 
 
-@app.post("/ask")
 @app.post("/api/ask")
 def ask(payload: AskIn):
     question = payload.question.strip()
@@ -478,13 +544,8 @@ def ask(payload: AskIn):
 
     if not plan.get("relevant"):
         return {
-            "relevant": False,
-            "answer_text": "This question is not related to the car dealership sales database.",
-            "sql_query_sent_by_sql_agent": None,
-            "database_result": [],
-            "planner_output": plan,
-            "validation_status": "not_required",
-            "retry_count": 0,
+            "answer": "This question is not related to the car dealership sales database.",
+            "sql_query": None
         }
 
     graph = build_validation_graph()
@@ -501,14 +562,24 @@ def ask(payload: AskIn):
             status_code=500,
             detail={
                 "message": "Could not produce a validated answer after retries.",
-                "answer_text": "Unable to generate a validated answer.",
-                "last_sql_query_sent_by_sql_agent": final_state.get("sql"),
+                "answer": "Unable to generate a validated answer.",
+                "last_sql_query": final_state.get("sql"),
                 "feedback": final_state.get("feedback"),
                 "attempts": final_state.get("attempts")
             }
         )
 
-    return {
-    "answer": final_state.get("final_answer"),
-    "sql_query": final_state.get("sql")
-}
+    response = {
+        "answer": final_state.get("final_answer"),
+        "sql_query": final_state.get("sql")
+    }
+
+    if DEBUG_RESPONSE:
+        response["database_result"] = final_state.get("rows", [])
+        response["planner_output"] = plan
+        response["validation_status"] = "passed"
+        response["retry_count"] = max(final_state.get("attempts", 1) - 1, 0)
+        response["mcp_used"] = True
+        response["mcp_tool_used"] = "run_readonly_sql"
+
+    return response
