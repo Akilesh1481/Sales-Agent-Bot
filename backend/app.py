@@ -140,7 +140,7 @@ def strip_sql(text: str) -> str:
 
 
 def planner_agent(question: str) -> Dict[str, Any]:
-    llm = get_llm("PLANNER_MODEL", "gemini-1.5-flash")
+    llm = get_llm("PLANNER_MODEL", "gemini-2.5-flash")
     schema = get_schema_text()
 
     prompt = ChatPromptTemplate.from_messages([
@@ -193,7 +193,7 @@ def custom_langchain_sql_agent(
     Execution happens later through read-only guarded database function.
     """
 
-    llm = get_llm("SQL_MODEL", "gemini-1.5-flash")
+    llm = get_llm("SQL_MODEL", "gemini-2.5-flash")
     schema = get_schema_text()
 
     prompt = ChatPromptTemplate.from_messages([
@@ -312,7 +312,7 @@ def format_final_answer(question: str, rows: List[Dict[str, Any]], sql: str) -> 
     if not rows:
         return "No matching records were found for this question."
 
-    llm = get_llm("FORMATTER_MODEL", "gemini-1.5-flash")
+    llm = get_llm("FORMATTER_MODEL", "gemini-2.5-flash")
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", """
@@ -451,10 +451,10 @@ def health():
         "status": "ok",
         "db_path": DB_PATH,
         "llm_provider": "Google Gemini",
-        "planner_model": os.getenv("PLANNER_MODEL", "gemini-1.5-flash"),
-        "sql_model": os.getenv("SQL_MODEL", "gemini-1.5-flash"),
+        "planner_model": os.getenv("PLANNER_MODEL", "gemini-2.5-flash"),
+        "sql_model": os.getenv("SQL_MODEL", "gemini-2.5-flash"),
         "validation_model": os.getenv("VALIDATION_MODEL", "gemini-2.5-flash"),
-        "formatter_model": os.getenv("FORMATTER_MODEL", "gemini-1.5-flash"),
+        "formatter_model": os.getenv("FORMATTER_MODEL", "gemini-2.5-flash"),
     }
 
 

@@ -1,62 +1,116 @@
-import React, { useState } from "react";
+import { useState } from "react";
+import axios from "axios";
+import "./style.css";
 
-export default function App() {
-  const [q, setQ] = useState("");
-  const [resp, setResp] = useState(null);
+function App() {
+  const [question, setQuestion] = useState("");
+  const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
 
-  const ask = async () => {
+  const askQuestion = async () => {
+    if (!question.trim()) return;
+
     setLoading(true);
-    setError("");
-    setResp(null);
+    setResponse(null);
+
     try {
-      const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-      const r = await fetch(`${apiBase}/api/ask`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q }),
+      const res = await axios.post("http://127.0.0.1:8000/api/ask", {
+        question: question,
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(JSON.stringify(data, null, 2));
-      setResp(data);
-    } catch (e) {
-      setError(e.message || "Request failed");
-    } finally {
-      setLoading(false);
+
+      setResponse(res.data);
+    } catch (error) {
+      setResponse({
+        answer: "Something went wrong. Please check backend or API key.",
+        sql_query: error.response?.data?.detail || error.message,
+      });
     }
+
+    setLoading(false);
   };
 
   return (
-    <div style={{ padding: 24, maxWidth: 1000, margin: "auto", fontFamily: "Arial" }}>
-      <h2>Car Dealership Sales Analysis Bot</h2>
-      <p>Ask any sales-related question about dealers, brands, models, customers, purchases, revenue, colors, parts, or recalls.</p>
-      <textarea
-        rows={4}
-        style={{ width: "100%" }}
-        value={q}
-        onChange={(e) => setQ(e.target.value)}
-        placeholder="Example: Which dealer sold the most cars in 2025?"
-      />
-      <br />
-      <button onClick={ask} disabled={loading || !q.trim()} style={{ marginTop: 12 }}>
-        {loading ? "Thinking..." : "Ask"}
-      </button>
+    <div className="page">
+      <div className="glow glow1"></div>
+      <div className="glow glow2"></div>
 
-      {error && <pre style={{ color: "red", whiteSpace: "pre-wrap" }}>{error}</pre>}
+      <nav className="navbar">
+        <div className="logo">AutoSQL AI</div>
+        <div className="tag">LangChain • LangGraph • Gemini</div>
+      </nav>
 
-      {resp && (
-        <div style={{ marginTop: 20 }}>
-          <h3>Answer</h3>
-          <p>{resp.answer}</p>
-          {resp.sql && <><h3>SQL Query</h3><pre style={{ background: "#f4f4f4", padding: 12, whiteSpace: "pre-wrap" }}>{resp.sql}</pre></>}
-          <h3>Validation</h3>
-          <p>Status: {resp.validation_status || "not applicable"}</p>
-          <p>Retries: {resp.retries ?? 0}</p>
-          <h3>Raw Response</h3>
-          <pre style={{ background: "#f4f4f4", padding: 12, whiteSpace: "pre-wrap" }}>{JSON.stringify(resp, null, 2)}</pre>
+      <section className="hero">
+        <h1>AI-Powered Car Dealership SQL Assistant</h1>
+        <p>
+          Ask questions about your dealership database in plain English. The AI
+          planner understands your question, generates SQL, validates the result,
+          and shows the exact query used.
+        </p>
+      </section>
+
+      <div className="main-card">
+        <div className="input-box">
+          <textarea
+            placeholder="Ask something like: Which customers own more than one vehicle?"
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+          ></textarea>
+
+          <button onClick={askQuestion} disabled={loading}>
+            {loading ? "Thinking..." : "Ask AI Agent"}
+          </button>
+        </div>
+
+        <div className="suggestions">
+          <button onClick={() => setQuestion("Which customers own more than one vehicle?")}>
+            Multiple vehicle owners
+          </button>
+          <button onClick={() => setQuestion("Which dealer generated the highest revenue?")}>
+            Highest revenue dealer
+          </button>
+          <button onClick={() => setQuestion("Which brand sold the most vehicles?")}>
+            Top selling brand
+          </button>
+        </div>
+      </div>
+
+      {loading && (
+        <div className="loader-card">
+          <div className="spinner"></div>
+          <p>Planner Agent → SQL Agent → Validator Agent is working...</p>
         </div>
       )}
+
+      {response && (
+        <div className="result-grid">
+          <div className="result-card answer-card">
+            <h2>Final Answer</h2>
+            <p>{response.answer || response.answer_text}</p>
+          </div>
+
+          <div className="result-card sql-card">
+            <h2>SQL Query Sent to Database</h2>
+            <pre>{response.sql_query || response.sql_query_sent_by_sql_agent}</pre>
+          </div>
+        </div>
+      )}
+
+      <section className="flow">
+        <h2>Backend Agent Flow</h2>
+        <div className="steps">
+          <div>Planner Agent</div>
+          <span>→</span>
+          <div>SQL Agent</div>
+          <span>→</span>
+          <div>Guardrail</div>
+          <span>→</span>
+          <div>SQLite DB</div>
+          <span>→</span>
+          <div>Validator</div>
+        </div>
+      </section>
     </div>
   );
 }
+
+export default App;
